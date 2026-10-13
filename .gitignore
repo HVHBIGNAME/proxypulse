@@ -1,0 +1,15 @@
+# binaries
+*.exe
+/proxypulse
+/proxypulse-gui
+
+# build resources (generated)
+/cmd/proxypulse-gui/rsrc.syso
+/assets/*.ico
+/assets/*_1024.png
+
+# local data
+*.db
+*.log
+proxies.txt
+best.txt

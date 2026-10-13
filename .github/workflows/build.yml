@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go vet ./...
+      - run: go test ./...
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build CLI
+        run: go build -o proxypulse.exe ./cmd/proxypulse
+      - name: Build GUI (manifest + icon via windres, shipped with MSYS2 on the runner)
+        shell: bash
+        run: |
+          set -e
+          python scripts/make_icon.py
+          (cd assets && windres -i proxypulse.rc -o ../cmd/proxypulse-gui/rsrc.syso --input-format=rc --output-format=coff)
+          go build -ldflags "-H windowsgui -s -w" -o proxypulse-gui.exe ./cmd/proxypulse-gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxypulse-windows
+          path: |
+            proxypulse.exe
+            proxypulse-gui.exe
