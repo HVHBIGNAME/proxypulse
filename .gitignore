@@ -13,3 +13,5 @@
 *.log
 proxies.txt
 best.txt
+# stray backups
+*~
