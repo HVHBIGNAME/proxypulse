@@ -1,118 +1,119 @@
-// Package store persists scan results to a local SQLite database and exports files.
+// Package store keeps a small on-disk cache of the last scan, and exports
+// result files. It uses plain JSON — no external database — to keep the
+// binaries tiny and startup instant.
 package store
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
+	"sort"
+	"sync"
 
 	"github.com/HVHBIGNAME/proxypulse/internal/proxy"
-	_ "modernc.org/sqlite"
 )
 
-// DB wraps the results database.
-type DB struct{ sql *sql.DB }
+// DB is an in-memory result cache backed by a compact JSON file.
+type DB struct {
+	path string
+	mu   sync.Mutex
+	byID map[string]proxy.Result
+}
 
-// Open opens (creating if needed) the database at the given path.
+func key(kind, addr string) string { return kind + "|" + addr }
+
+// Open loads the cache at path, creating an empty one if it does not exist.
 func Open(path string) (*DB, error) {
-	if dir := filepath.Dir(path); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-	db, err := sql.Open("sqlite", path)
+	d := &DB{path: path, byID: make(map[string]proxy.Result)}
+	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return d, nil
+		}
 		return nil, err
 	}
-	d := &DB{sql: db}
-	if err := d.migrate(); err != nil {
-		return nil, err
+	var saved struct {
+		Results []proxy.Result `json:"results"`
+	}
+	// Tolerate a bare array as well as the wrapper object.
+	if err := json.Unmarshal(data, &saved); err != nil || len(saved.Results) == 0 {
+		var bare []proxy.Result
+		if json.Unmarshal(data, &bare) == nil {
+			saved.Results = bare
+		}
+	}
+	for _, r := range saved.Results {
+		d.byID[key(r.Kind, r.Addr)] = r
 	}
 	return d, nil
 }
 
-func (d *DB) migrate() error {
-	_, err := d.sql.Exec(`
-CREATE TABLE IF NOT EXISTS results (
-  addr       TEXT NOT NULL,
-  kind       TEXT NOT NULL,
-  source     TEXT,
-  alive      INTEGER,
-  latency_ms INTEGER,
-  speed_kbs  INTEGER,
-  exit_ip    TEXT,
-  country    TEXT,
-  anonymity  TEXT,
-  err        TEXT,
-  checked_at TEXT,
-  PRIMARY KEY (kind, addr)
-);
-CREATE INDEX IF NOT EXISTS idx_alive_latency ON results(alive, latency_ms);`)
-	return err
-}
-
-// Save upserts results (keeps only the most recent row per endpoint).
+// Save upserts the given results and rewrites the cache file atomically.
 func (d *DB) Save(rs []proxy.Result) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	stmt, err := tx.Prepare(`INSERT INTO results
-      (addr,kind,source,alive,latency_ms,speed_kbs,exit_ip,country,anonymity,err,checked_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(kind,addr) DO UPDATE SET
-        source=excluded.source, alive=excluded.alive, latency_ms=excluded.latency_ms,
-        speed_kbs=excluded.speed_kbs, exit_ip=excluded.exit_ip, country=excluded.country,
-        anonymity=excluded.anonymity, err=excluded.err, checked_at=excluded.checked_at`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for _, r := range rs {
-		if _, err := stmt.Exec(r.Addr, r.Kind, r.Source, boolInt(r.Alive), r.LatencyMs,
-			r.SpeedKBs, r.ExitIP, r.Country, r.Anonymity, r.Err, r.CheckedAt.UTC().Format(time.RFC3339)); err != nil {
-			return err
-		}
+		d.byID[key(r.Kind, r.Addr)] = r
 	}
-	return tx.Commit()
+	return d.flush()
 }
 
-// Top returns the n fastest alive proxies previously stored.
-func (d *DB) Top(n int) ([]proxy.Result, error) {
-	rows, err := d.sql.Query(`SELECT addr,kind,source,latency_ms,speed_kbs,exit_ip,country,anonymity,checked_at
-      FROM results WHERE alive=1 ORDER BY latency_ms ASC LIMIT ?`, n)
+func (d *DB) flush() error {
+	if dir := filepath.Dir(d.path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	list := make([]proxy.Result, 0, len(d.byID))
+	for _, r := range d.byID {
+		list = append(list, r)
+	}
+	data, err := json.Marshal(struct {
+		Results []proxy.Result `json:"results"`
+	}{list})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
-	var out []proxy.Result
-	for rows.Next() {
-		var r proxy.Result
-		var ts string
-		if err := rows.Scan(&r.Addr, &r.Kind, &r.Source, &r.LatencyMs, &r.SpeedKBs,
-			&r.ExitIP, &r.Country, &r.Anonymity, &ts); err != nil {
-			return nil, err
+	tmp := d.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, d.path) // atomic replace
+}
+
+// Top returns the n fastest alive proxies.
+func (d *DB) Top(n int) ([]proxy.Result, error) {
+	d.mu.Lock()
+	alive := make([]proxy.Result, 0, len(d.byID))
+	for _, r := range d.byID {
+		if r.Alive {
+			alive = append(alive, r)
 		}
-		r.Alive = true
-		r.CheckedAt, _ = time.Parse(time.RFC3339, ts)
-		out = append(out, r)
 	}
-	return out, rows.Err()
+	d.mu.Unlock()
+	sort.Slice(alive, func(i, j int) bool { return alive[i].LatencyMs < alive[j].LatencyMs })
+	if n > 0 && len(alive) > n {
+		alive = alive[:n]
+	}
+	return alive, nil
 }
 
-// Count returns alive/total counts.
+// Count returns alive and total row counts.
 func (d *DB) Count() (alive, total int, err error) {
-	err = d.sql.QueryRow(`SELECT
-      COALESCE(SUM(alive),0), COUNT(*) FROM results`).Scan(&alive, &total)
-	return
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, r := range d.byID {
+		total++
+		if r.Alive {
+			alive++
+		}
+	}
+	return alive, total, nil
 }
 
-// Close closes the database.
-func (d *DB) Close() error { return d.sql.Close() }
+// Close is a no-op; the cache is flushed on every Save.
+func (d *DB) Close() error { return nil }
 
-// ExportJSON writes results as JSON.
+// ExportJSON writes results as pretty JSON.
 func ExportJSON(path string, rs []proxy.Result) error {
 	data, err := json.MarshalIndent(rs, "", "  ")
 	if err != nil {
@@ -134,11 +135,4 @@ func ExportText(path string, rs []proxy.Result) error {
 		}
 	}
 	return nil
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }

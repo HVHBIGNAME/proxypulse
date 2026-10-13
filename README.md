@@ -76,9 +76,23 @@ proxypulse.exe -db-only -top 20
 | `-min-speed` | 0 | отсечь медленные (КБ/с) |
 | `-speed` / `-anon` | true | замер скорости / анонимности |
 | `-out` / `-json` | — | файл со списком / JSON |
+| `-best` | — | вывести ТОЛЬКО один лучший прокси и выйти |
+| `-format` | text | с `-best`: `text` или `json` |
 | `-list-sources` | — | показать пулы и выйти |
 
-Результаты по умолчанию: `%LOCALAPPDATA%\ProxyPulse\` (`proxies.db`, `best.txt`).
+### Для скриптов и агентов
+
+`-best` печатает ровно одну строку — готовый прокси — и ничего больше.
+Прогресс уходит в stderr, так что stdout чист для захвата:
+
+```bash
+proxy=$(proxypulse -best -limit 800)          # http://IP:PORT или socks5://IP:PORT
+curl -x "$proxy" https://api.ipify.org/       # сразу использовать
+proxypulse -best -format json | jq -r .addr   # метаданные (пинг, скорость, анонимность)
+proxypulse -db-only -best                      # взять лучший из кэша без сканирования
+```
+
+Результаты по умолчанию: `%LOCALAPPDATA%\ProxyPulse\` (`proxies.json`, `best.txt`).
 
 ## Источники
 
@@ -101,8 +115,11 @@ cmd/proxypulse-gui     Windows GUI (lxn/walk)
 internal/sources       загрузка и разбор пулов
 internal/proxy         проверка за прокси, пинг, скорость, анонимность
 internal/app           конвейер: fetch → validate → enrich → sort
-internal/store         SQLite-кэш и экспорт
+internal/store         JSON-кэш и экспорт
 ```
+
+Вес и скорость: без внешних СУБД — только `lxn/walk` и `x/net`.
+CLI ≈ 6 МБ, GUI ≈ 10 МБ, старт мгновенный, кэш читается одним `ReadFile`.
 
 Проверка живого прокси — реальный `GET https://api.ipify.org/` через прокси:
 успех = ответ 200 и полученный адрес выхода. Анонимность определяется по

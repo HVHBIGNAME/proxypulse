@@ -146,7 +146,7 @@ func main() {
 
 func run() error {
 	st := &state{}
-	db, err := store.Open(filepath.Join(appDir(), "proxies.db"))
+	db, err := store.Open(filepath.Join(appDir(), "proxies.json"))
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}

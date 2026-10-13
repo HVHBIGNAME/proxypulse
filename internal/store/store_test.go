@@ -11,7 +11,7 @@ import (
 
 func TestSaveTopCountAndExport(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(filepath.Join(dir, "t.db"))
+	db, err := Open(filepath.Join(dir, "t.json"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -57,5 +57,23 @@ func TestSaveTopCountAndExport(t *testing.T) {
 	}
 	if want := "http://2.2.2.2:80\nhttp://1.1.1.1:80\n"; string(data) != want {
 		t.Errorf("export text = %q, want %q", string(data), want)
+	}
+}
+
+// TestPersistence checks that a reopened cache still knows its rows.
+func TestPersistence(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	db, _ := Open(p)
+	_ = db.Save([]proxy.Result{{Addr: "9.9.9.9:80", Kind: "http", Alive: true, LatencyMs: 120}})
+	_ = db.Close()
+
+	re, err := Open(p)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	top, _ := re.Top(5)
+	if len(top) != 1 || top[0].Addr != "9.9.9.9:80" {
+		t.Fatalf("reloaded top = %+v", top)
 	}
 }

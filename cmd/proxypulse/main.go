@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -21,6 +22,13 @@ import (
 	"github.com/HVHBIGNAME/proxypulse/internal/sources"
 	"github.com/HVHBIGNAME/proxypulse/internal/store"
 )
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -40,11 +48,13 @@ func run() error {
 		anon     = flag.Bool("anon", true, "classify anonymity of survivors")
 		jsonOut  = flag.String("json", "", "write results to this JSON file")
 		textOut  = flag.String("out", "", "write proxy URLs (one per line) to this file")
-		dbPath   = flag.String("db", "", "SQLite result cache path")
+		dbPath   = flag.String("db", "", "result cache file path")
 		listSrc  = flag.Bool("list-sources", false, "print known pools and exit")
 		dbOnly   = flag.Bool("db-only", false, "skip fetching, rank what is already cached")
 		minSpeed = flag.Int("min-speed", 0, "drop survivors slower than this KB/s")
 		quiet    = flag.Bool("quiet", false, "suppress progress output")
+		best     = flag.Bool("best", false, "print ONLY the single best proxy URL and exit (machine-readable)")
+		format   = flag.String("format", "text", "with -best: text|json")
 	)
 	flag.Parse()
 
@@ -53,6 +63,12 @@ func run() error {
 			fmt.Printf("%-20s %-7s %s\n", s.ID, s.Kind, s.Name)
 		}
 		return nil
+	}
+	if *best {
+		// Machine-readable mode: silence progress, print one proxy, exit.
+		*quiet = true
+		*top = 1
+		*workers = max(*workers, 300)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -153,6 +169,21 @@ func run() error {
 	elapsed := time.Since(start)
 	progress("done in %s: %d/%d alive\n", elapsed.Round(time.Millisecond), len(ranked), total)
 
+	// Machine-readable mode: emit exactly one proxy (or nothing) and exit.
+	if *best {
+		if len(ranked) == 0 {
+			return fmt.Errorf("no working proxy found")
+		}
+		b := ranked[0]
+		if *format == "json" {
+			out, _ := json.MarshalIndent(b, "", "  ")
+			fmt.Println(string(out))
+		} else {
+			fmt.Println(b.URL())
+		}
+		return nil
+	}
+
 	printTable(ranked, *top)
 
 	// Always leave the single fastest proxy in best.txt for a true one-click copy.
@@ -225,5 +256,5 @@ func defaultDBPath() string {
 	if base == "" {
 		base = "."
 	}
-	return filepath.Join(base, "ProxyPulse", "proxies.db")
+	return filepath.Join(base, "ProxyPulse", "proxies.json")
 }
