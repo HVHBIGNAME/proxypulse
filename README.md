@@ -12,8 +12,7 @@ ProxyPulse скачивает публичные пулы прокси, пара
 
 ## Что делает
 
-- **Собирает** ~9 000 адресов из 10 публичных пулов (HTTP и SOCKS5) параллельно.
-- **Проверяет** каждую кандидатуру живым HTTPS-запросом (реальный IP выхода), по умолчанию до 1500 штук с 400 потоками — полный проход ~30–60 секунд.
+- **Собирает** ~12 000 уникальных адресов из 23 пулов (HTTP и SOCKS5) параллельно, перемешивая их round-robin.
 - **Замеряет** пинг, скорость скачивания (КБ/с) и класс анонимности (elite/anonymous/transparent).
 - **Сортирует** по пингу и держит свежий результат; мёртвые не показываются.
 - **Отдаёт результат**: клик — прокси в буфере обмена; кнопка сохранения — список `.txt` или `.json`.
@@ -106,6 +105,20 @@ proxypulse -db-only -best                      # взять лучший из к
 | `proxifly-http` | proxifly/free-proxy-list |
 | `proxyscrape-http`, `proxyscrape-socks5` | ProxyScrape API |
 | `geonode` | geonode.com API |
+| `vakhov` | vakhov/fresh-proxy-list (JSON, per-protocol) |
+| `murong-http`, `murong-socks5` | MuRongPIG/Proxy-Master |
+| `hideipme-http`, `hideipme-socks5` | zloi-user/hideip.me (с гео) |
+| `hookzof-socks5` | hookzof/socks5_list |
+| `shifty-http`, `shifty-socks5` | ShiftyTR/Proxy-List |
+| `clarketm` | clarketm/proxy-list |
+| `aliilapro` | ALIILAPRO/Proxy |
+| `anonwork-http` | anonym0uswork1221/free-proxies |
+| `prxchk-http`, `prxchk-socks5` | prxchk/proxy-list |
+
+Всего **23 пула**, ~12 000 уникальных адресов после дедупликации. Кандидаты
+перемешиваются **round-robin** между пулами, а каждый пул отдаёт не больше
+`DefaultCapPerSource` (1200) записей, равномерно распределённых по списку, —
+поэтому гигантские зеркала (100k+ адресов) не вытесняют остальные пулы.
 
 ## Как это устроено
 

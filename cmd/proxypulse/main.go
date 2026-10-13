@@ -59,7 +59,7 @@ func run() error {
 	flag.Parse()
 
 	if *listSrc {
-		for _, s := range sources.Registry {
+		for _, s := range sources.Registry() {
 			fmt.Printf("%-20s %-7s %s\n", s.ID, s.Kind, s.Name)
 		}
 		return nil
@@ -101,7 +101,7 @@ func run() error {
 		progress("re-checking %d cached proxies\n", len(cands))
 	} else {
 		selected := splitCSV(*srcFlag)
-		progress("fetching %d pool(s)...\n", len(sources.Registry))
+		progress("fetching %d pool(s)...\n", len(sources.Registry()))
 		var results []sources.FetchResult
 		cands, results, err = app.Fetch(ctx, selected, 25*time.Second)
 		if err != nil {
