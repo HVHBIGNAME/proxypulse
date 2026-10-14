@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,5 +76,115 @@ func TestPersistence(t *testing.T) {
 	top, _ := re.Top(5)
 	if len(top) != 1 || top[0].Addr != "9.9.9.9:80" {
 		t.Fatalf("reloaded top = %+v", top)
+	}
+}
+
+func TestOlderResultsCannotOverwriteNewerChecks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	older := proxy.Result{Addr: "10.0.0.1:80", Kind: proxy.KindHTTP, Alive: true, CheckedAt: time.Now().Add(-time.Minute)}
+	newer := older
+	newer.Alive = false
+	newer.CheckedAt = older.CheckedAt.Add(time.Minute)
+	if err := db.Save([]proxy.Result{newer, older}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Save([]proxy.Result{older}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cache := range []*DB{db, reopened} {
+		alive, total, err := cache.Count()
+		if err != nil || alive != 0 || total != 1 {
+			t.Fatalf("stale live result resurrected: alive=%d total=%d err=%v", alive, total, err)
+		}
+	}
+	// Equal timestamps are used when enrichment replaces a reachability result.
+	newer.Alive, newer.SpeedKBs = true, 100
+	if err := db.Save([]proxy.Result{newer}); err != nil {
+		t.Fatal(err)
+	}
+	top, err := db.Top(1)
+	if err != nil || len(top) != 1 || top[0].SpeedKBs != 100 {
+		t.Fatalf("same-check enrichment was lost: %+v, %v", top, err)
+	}
+}
+
+func TestSaveFailureDoesNotChangeMemoryOrDisk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.json")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := proxy.Result{Addr: "10.0.0.1:80", Kind: proxy.KindHTTP, Alive: true, CheckedAt: time.Now()}
+	if err := db.Save([]proxy.Result{row}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Replacing a directory with the cache file must fail on all platforms.
+	db.path = blocked
+	row.Alive = false
+	if err := db.Save([]proxy.Result{row}); err == nil {
+		t.Fatal("save to a directory succeeded")
+	}
+	alive, total, err := db.Count()
+	if err != nil || alive != 1 || total != 1 {
+		t.Fatalf("failed save changed memory: alive=%d total=%d err=%v", alive, total, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("failed save changed disk: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("failed save left temporary files: %v, %v", matches, err)
+	}
+}
+
+func TestOpenRejectsCorruptCache(t *testing.T) {
+	for _, body := range []string{`{"results":[`, `{"results":[{"addr":123}]}`, `not JSON`} {
+		path := filepath.Join(t.TempDir(), "cache.json")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if db, err := Open(path); err == nil || db != nil {
+			t.Fatalf("corrupt cache %q loaded: %v, %v", body, db, err)
+		}
+	}
+}
+
+func TestOpenBareArrayKeepsNewestDuplicate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	newer := proxy.Result{Addr: "10.0.0.1:80", Kind: proxy.KindHTTP, Alive: false, CheckedAt: time.Now()}
+	older := newer
+	older.Alive, older.CheckedAt = true, newer.CheckedAt.Add(-time.Minute)
+	data, err := json.Marshal([]proxy.Result{newer, older})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alive, total, err := db.Count()
+	if err != nil || alive != 0 || total != 1 {
+		t.Fatalf("old duplicate won: alive=%d total=%d err=%v", alive, total, err)
 	}
 }

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -81,6 +82,7 @@ func Probe(ctx context.Context, c Candidate, target string, timeout time.Duratio
 	if err != nil {
 		return ProbeResult{Err: err}
 	}
+	defer cl.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return ProbeResult{Err: err}
@@ -93,11 +95,15 @@ func Probe(ctx context.Context, c Candidate, target string, timeout time.Duratio
 		return ProbeResult{Err: err, Latency: time.Since(start)}
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4097))
+	if len(body) > 4096 && err == nil {
+		err = fmt.Errorf("probe response exceeds 4096 bytes")
+	}
 	return ProbeResult{
 		StatusCode: resp.StatusCode,
 		Body:       strings.TrimSpace(string(body)),
 		Latency:    time.Since(start),
+		Err:        err,
 	}
 }
 
@@ -119,8 +125,13 @@ func Check(ctx context.Context, c Candidate, ipURL string, timeout time.Duration
 		res.Err = "bad status"
 		return res
 	}
+	ip := net.ParseIP(firstToken(pr.Body))
+	if ip == nil {
+		res.Err = "invalid exit IP"
+		return res
+	}
 	res.LatencyMs = int(pr.Latency.Milliseconds())
-	res.ExitIP = firstToken(pr.Body)
+	res.ExitIP = ip.String()
 	res.Alive = true
 	return res
 }
@@ -131,6 +142,7 @@ func Speed(ctx context.Context, c Candidate, speedURL string, timeout time.Durat
 	if err != nil {
 		return 0, err
 	}
+	defer cl.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, speedURL, nil)
 	if err != nil {
 		return 0, err
@@ -141,7 +153,10 @@ func Speed(ctx context.Context, c Candidate, speedURL string, timeout time.Durat
 		return 0, err
 	}
 	defer resp.Body.Close()
-	n, err := io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1_000_000))
 	if err != nil {
 		return 0, err
 	}
@@ -154,7 +169,11 @@ func Speed(ctx context.Context, c Candidate, speedURL string, timeout time.Durat
 
 // RealIP returns the caller's real public IP (direct connection).
 func RealIP(ctx context.Context, ipURL string, timeout time.Duration) string {
-	cl := &http.Client{Timeout: timeout}
+	cl := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		Timeout:   timeout,
+	}
+	defer cl.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ipURL, nil)
 	if err != nil {
 		return ""
@@ -164,8 +183,18 @@ func RealIP(ctx context.Context, ipURL string, timeout time.Duration) string {
 		return ""
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-	return firstToken(string(body))
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 257))
+	if err != nil || len(body) > 256 {
+		return ""
+	}
+	ip := net.ParseIP(firstToken(string(body)))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 // Anonymity classifies how much the proxy reveals about the client.

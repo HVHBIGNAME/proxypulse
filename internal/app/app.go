@@ -5,7 +5,6 @@ import (
 	"context"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/HVHBIGNAME/proxypulse/internal/proxy"
@@ -19,9 +18,9 @@ type Options struct {
 	Timeout      time.Duration   // per-proxy timeout
 	Limit        int             // max candidates to test (0 = no limit)
 	SpeedTest    bool            // measure throughput for survivors
-	SpeedTop     int             // speed-test only the N fastest (0 = all)
+	SpeedTop     int             // speed-test only the N fastest (0 = 40, negative = all)
 	Anonymity    bool            // classify anonymity for survivors
-	AnonTop      int             // anonymity-test only the N fastest (0 = all)
+	AnonTop      int             // anonymity-test only the N fastest (0 = 100, negative = all)
 	IPURL        string          // target used for reachability + exit IP
 	SpeedURL     string          // target used for throughput
 	HeadersURL   string          // target used for anonymity
@@ -70,25 +69,22 @@ func Validate(ctx context.Context, cands []proxy.Candidate, opt Options, onResul
 	}
 	var (
 		wg    sync.WaitGroup
-		sem   = make(chan struct{}, opt.Workers)
+		sem   = make(chan struct{}, min(opt.Workers, len(cands)))
 		mu    sync.Mutex
 		alive []proxy.Result
-		done  int64
 	)
-	total := int64(len(cands))
 	for _, c := range cands {
-		if ctx.Err() != nil {
+		if !acquire(ctx, sem) {
 			break
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(c proxy.Candidate) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
 			res := proxy.Check(ctx, c, opt.IPURL, opt.Timeout)
-			n := atomic.AddInt64(&done, 1)
-			_ = n
-			_ = total
 			if res.Alive {
 				mu.Lock()
 				alive = append(alive, res)
@@ -113,10 +109,16 @@ func Finalise(ctx context.Context, alive []proxy.Result, opt Options) []proxy.Re
 	Sort(out)
 
 	speedN := len(out)
+	if !opt.SpeedTest {
+		speedN = 0
+	}
 	if opt.SpeedTop > 0 && opt.SpeedTop < speedN {
 		speedN = opt.SpeedTop
 	}
 	anonN := len(out)
+	if !opt.Anonymity || opt.DirectIP == "" {
+		anonN = 0
+	}
 	if opt.AnonTop > 0 && opt.AnonTop < anonN {
 		anonN = opt.AnonTop
 	}
@@ -127,27 +129,51 @@ func Finalise(ctx context.Context, alive []proxy.Result, opt Options) []proxy.Re
 
 	var (
 		wg  sync.WaitGroup
-		sem = make(chan struct{}, min(opt.Workers, 64))
+		sem = make(chan struct{}, min(n, min(opt.Workers, 64)))
 	)
 	for i := 0; i < n; i++ {
+		if !acquire(ctx, sem) {
+			break
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
 			c := proxy.Candidate{Addr: out[i].Addr, Kind: out[i].Kind, Source: out[i].Source, Country: out[i].Country}
 			if opt.SpeedTest && i < speedN {
 				if kbs, err := proxy.Speed(ctx, c, opt.SpeedURL, opt.Timeout*4); err == nil {
 					out[i].SpeedKBs = kbs
 				}
 			}
-			if opt.Anonymity && i < anonN && opt.DirectIP != "" {
-				out[i].Anonymity = proxy.Anonymity(ctx, c, opt.HeadersURL, opt.DirectIP, opt.Timeout*2)
+			if i < anonN && ctx.Err() == nil {
+				anonymity := proxy.Anonymity(ctx, c, opt.HeadersURL, opt.DirectIP, opt.Timeout*2)
+				if ctx.Err() == nil {
+					out[i].Anonymity = anonymity
+				}
 			}
 		}(i)
 	}
 	wg.Wait()
 	return out
+}
+
+func acquire(ctx context.Context, sem chan struct{}) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case sem <- struct{}{}:
+		if ctx.Err() != nil {
+			<-sem
+			return false
+		}
+		return true
+	}
 }
 
 // Sort orders results fastest-first.

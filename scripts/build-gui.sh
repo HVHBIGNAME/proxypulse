@@ -18,6 +18,6 @@ echo "[2/3] compiling resources..."
     --input-format=rc --output-format=coff)
 
 echo "[3/3] building GUI..."
-go build -ldflags "-H windowsgui -s -w" -o proxypulse-gui.exe ./cmd/proxypulse-gui
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "-H windowsgui -s -w" -o proxypulse-gui.exe ./cmd/proxypulse-gui
 
 echo "done: proxypulse-gui.exe"

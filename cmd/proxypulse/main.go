@@ -13,7 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,40 +23,60 @@ import (
 	"github.com/HVHBIGNAME/proxypulse/internal/store"
 )
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+var version = "dev"
 
 func main() {
-	if err := run(); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("proxypulse", flag.ContinueOnError)
 	var (
-		srcFlag  = flag.String("sources", "", "comma-separated source IDs (default: all pools)")
-		workers  = flag.Int("workers", 300, "concurrent proxy checks")
-		timeout  = flag.Duration("timeout", 4*time.Second, "per-proxy timeout")
-		limit    = flag.Int("limit", 0, "max candidates to test (0 = all)")
-		top      = flag.Int("top", 10, "how many results to print")
-		speed    = flag.Bool("speed", true, "measure throughput of survivors")
-		anon     = flag.Bool("anon", true, "classify anonymity of survivors")
-		jsonOut  = flag.String("json", "", "write results to this JSON file")
-		textOut  = flag.String("out", "", "write proxy URLs (one per line) to this file")
-		dbPath   = flag.String("db", "", "result cache file path")
-		listSrc  = flag.Bool("list-sources", false, "print known pools and exit")
-		dbOnly   = flag.Bool("db-only", false, "skip fetching, rank what is already cached")
-		minSpeed = flag.Int("min-speed", 0, "drop survivors slower than this KB/s")
-		quiet    = flag.Bool("quiet", false, "suppress progress output")
-		best     = flag.Bool("best", false, "print ONLY the single best proxy URL and exit (machine-readable)")
-		format   = flag.String("format", "text", "with -best: text|json")
+		srcFlag     = flags.String("sources", "", "comma-separated source IDs (default: all pools)")
+		workers     = flags.Int("workers", 300, "concurrent proxy checks")
+		timeout     = flags.Duration("timeout", 4*time.Second, "per-proxy timeout")
+		limit       = flags.Int("limit", 0, "max candidates to test (0 = all)")
+		top         = flags.Int("top", 10, "how many results to print")
+		speed       = flags.Bool("speed", true, "measure throughput of survivors")
+		anon        = flags.Bool("anon", true, "classify anonymity of survivors")
+		jsonOut     = flags.String("json", "", "write results to this JSON file")
+		textOut     = flags.String("out", "", "write proxy URLs (one per line) to this file")
+		dbPath      = flags.String("db", "", "result cache file path")
+		listSrc     = flags.Bool("list-sources", false, "print known pools and exit")
+		dbOnly      = flags.Bool("db-only", false, "skip fetching, rank what is already cached")
+		minSpeed    = flags.Int("min-speed", 0, "drop survivors slower than this KB/s")
+		quiet       = flags.Bool("quiet", false, "suppress progress output")
+		best        = flags.Bool("best", false, "print ONLY the single best proxy URL and exit (machine-readable)")
+		format      = flags.String("format", "text", "with -best: text|json")
+		showVersion = flags.Bool("version", false, "print version and exit")
 	)
-	flag.Parse()
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+	if *showVersion {
+		fmt.Printf("ProxyPulse %s\n", version)
+		return nil
+	}
+	switch {
+	case *top < 0:
+		return fmt.Errorf("-top must be non-negative (got %d)", *top)
+	case *workers <= 0:
+		return fmt.Errorf("-workers must be greater than zero (got %d)", *workers)
+	case *timeout <= 0:
+		return fmt.Errorf("-timeout must be greater than zero (got %s)", *timeout)
+	case *limit < 0:
+		return fmt.Errorf("-limit must be non-negative; 0 means all candidates (got %d)", *limit)
+	case *format != "text" && *format != "json":
+		return fmt.Errorf("unsupported -format %q: use text or json", *format)
+	}
 
 	if *listSrc {
 		for _, s := range sources.Registry() {
@@ -68,11 +88,7 @@ func run() error {
 		// Machine-readable mode: silence progress, print one proxy, exit.
 		*quiet = true
 		*top = 1
-		*workers = max(*workers, 300)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	if *dbPath == "" {
 		*dbPath = defaultDBPath()
@@ -122,36 +138,48 @@ func run() error {
 		progress("limited to %d candidates\n", *limit)
 	}
 
-	directIP := proxy.RealIP(context.Background(), proxy.DefaultIPURL, 6*time.Second)
-	if directIP != "" {
-		progress("your real IP: %s\n", directIP)
-	}
-
 	opt := app.Options{
 		Workers:   *workers,
 		Timeout:   *timeout,
 		SpeedTest: *speed,
 		Anonymity: *anon,
-		DirectIP:  directIP,
 	}
 
-	var checked, alive int64
-	total := int64(len(cands))
+	var mu sync.Mutex
+	var checked, alive int
+	var checkedResults []proxy.Result
+	total := len(cands)
 	start := time.Now()
 	live := app.Validate(ctx, cands, opt, func(r proxy.Result) {
-		n := atomic.AddInt64(&checked, 1)
+		mu.Lock()
+		defer mu.Unlock()
+		checked++
 		if r.Alive {
-			atomic.AddInt64(&alive, 1)
+			alive++
 		}
-		if !*quiet && (n%50 == 0 || n == total) {
-			fmt.Fprintf(os.Stderr, "\r  checked %d/%d  alive %d  ...", n, total, atomic.LoadInt64(&alive))
+		// Cancellation is not evidence that a cached proxy has died.
+		if r.Alive || ctx.Err() == nil {
+			checkedResults = append(checkedResults, r)
+		}
+		if !*quiet && (checked%50 == 0 || checked == total) {
+			fmt.Fprintf(os.Stderr, "\r  checked %d/%d  alive %d  ...", checked, total, alive)
 		}
 	})
 	if !*quiet {
 		fmt.Fprintln(os.Stderr)
 	}
 
+	if opt.Anonymity && len(live) > 0 && ctx.Err() == nil {
+		opt.DirectIP = proxy.RealIP(ctx, proxy.DefaultIPURL, 6*time.Second)
+		if opt.DirectIP != "" {
+			progress("your real IP: %s\n", opt.DirectIP)
+		}
+	}
 	ranked := app.Finalise(ctx, live, opt)
+	// Enrichment replaces reachability-only rows; output filters must not affect the cache.
+	if err := db.Save(append(checkedResults, ranked...)); err != nil {
+		progress("warn: db save: %v\n", err)
+	}
 	if *minSpeed > 0 {
 		filtered := ranked[:0]
 		for _, r := range ranked {
@@ -160,10 +188,6 @@ func run() error {
 			}
 		}
 		ranked = filtered
-	}
-
-	if err := db.Save(ranked); err != nil {
-		progress("warn: db save: %v\n", err)
 	}
 
 	elapsed := time.Since(start)

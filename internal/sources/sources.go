@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,7 +123,14 @@ func FetchAll(ctx context.Context, selected []string, timeout time.Duration, wor
 	if len(list) == 0 {
 		return nil, nil, fmt.Errorf("no sources selected")
 	}
+	return fetchSources(ctx, list, timeout, workers)
+}
+
+func fetchSources(ctx context.Context, list []Source, timeout time.Duration, workers int) ([]proxy.Candidate, []FetchResult, error) {
 	if workers < 1 {
+		workers = len(list)
+	}
+	if workers > len(list) {
 		workers = len(list)
 	}
 
@@ -139,16 +147,32 @@ func FetchAll(ctx context.Context, selected []string, timeout time.Duration, wor
 		wg  sync.WaitGroup
 		sem = make(chan struct{}, workers)
 	)
-	for i, s := range list {
+	next := 0
+fetchLoop:
+	for ; next < len(list); next++ {
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break fetchLoop
+		case sem <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			<-sem
+			break
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(i int, s Source) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			start := time.Now()
 			got, err := fetchOne(ctx, cl, s)
 			perSource[i] = fetched{src: s, got: got, err: err, dur: time.Since(start)}
-		}(i, s)
+		}(next, list[next])
+	}
+	for i := next; i < len(list); i++ {
+		perSource[i] = fetched{src: list[i], err: ctx.Err()}
 	}
 	wg.Wait()
 
@@ -187,7 +211,7 @@ func FetchAll(ctx context.Context, selected []string, timeout time.Duration, wor
 		seen[k] = struct{}{}
 		out = append(out, c)
 	}
-	return out, results, nil
+	return out, results, ctx.Err()
 }
 
 func fetchOne(ctx context.Context, cl *http.Client, s Source) ([]proxy.Candidate, error) {
@@ -204,24 +228,46 @@ func fetchOne(ctx context.Context, cl *http.Client, s Source) ([]proxy.Candidate
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	const maxSourceBytes = 32 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSourceBytes+1))
 	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxSourceBytes {
+		return nil, fmt.Errorf("source response exceeds %d bytes", maxSourceBytes)
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var got []proxy.Candidate
 	switch s.Format {
 	case "geonode":
-		got = parseGeonode(data, s)
+		got, err = parseGeonode(data, s)
 	case "proxifly":
-		got = parseProxifly(data, s)
+		got, err = parseProxifly(data, s)
 	case "vakhov":
-		got = parseVakhov(data, s)
+		got, err = parseVakhov(data, s)
 	case "colon":
-		got = parseColon(data, s)
+		got, err = parseColon(data, s)
 	default:
-		got = parseIPPort(data, s)
+		got, err = parseIPPort(data, s)
 	}
-	return capSample(got, s.Cap), nil
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(got))
+	unique := got[:0]
+	for _, c := range got {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if c.Addr == "" || c.Kind == "" || seen[c.Key()] {
+			continue
+		}
+		seen[c.Key()] = true
+		unique = append(unique, c)
+	}
+	return capSample(unique, s.Cap), nil
 }
 
 // capSample limits a list to n entries spread evenly across it (not just the
@@ -242,22 +288,26 @@ func capSample(in []proxy.Candidate, n int) []proxy.Candidate {
 }
 
 // parseIPPort handles "ip:port" lines, optionally with scheme or trailing data.
-func parseIPPort(data []byte, s Source) []proxy.Candidate {
+func parseIPPort(data []byte, s Source) ([]proxy.Candidate, error) {
 	var out []proxy.Candidate
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
+		kind := s.Kind
+		if protocol, _, ok := strings.Cut(sc.Text(), "://"); ok {
+			kind = kindFromProtocol(protocol, s.Kind)
+		}
 		addr := normaliseAddr(sc.Text())
-		if addr == "" {
+		if addr == "" || kind == "" {
 			continue
 		}
-		out = append(out, proxy.Candidate{Addr: addr, Kind: s.Kind, Source: s.ID})
+		out = append(out, proxy.Candidate{Addr: addr, Kind: kind, Source: s.ID})
 	}
-	return out
+	return out, sc.Err()
 }
 
 // parseColon handles "ip:port:country" (extra fields after the port).
-func parseColon(data []byte, s Source) []proxy.Candidate {
+func parseColon(data []byte, s Source) ([]proxy.Candidate, error) {
 	var out []proxy.Candidate
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -280,11 +330,11 @@ func parseColon(data []byte, s Source) []proxy.Candidate {
 		}
 		out = append(out, c)
 	}
-	return out
+	return out, sc.Err()
 }
 
 // parseVakhov handles the vakhov/fresh-proxy-list JSON (per-protocol flags).
-func parseVakhov(data []byte, s Source) []proxy.Candidate {
+func parseVakhov(data []byte, s Source) ([]proxy.Candidate, error) {
 	var payload []struct {
 		IP      string `json:"ip"`
 		Port    string `json:"port"`
@@ -295,27 +345,25 @@ func parseVakhov(data []byte, s Source) []proxy.Candidate {
 		Socks5  string `json:"socks5"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil
+		return nil, err
 	}
 	var out []proxy.Candidate
 	for _, e := range payload {
-		kind := s.Kind
-		switch {
-		case e.Socks5 == "1" || e.Socks4 == "1":
-			kind = proxy.KindSOCKS5
-		case e.HTTP == "1" || e.SSL == "1":
-			kind = proxy.KindHTTP
-		}
 		addr := normaliseAddr(e.IP + ":" + e.Port)
 		if addr == "" {
 			continue
 		}
-		out = append(out, proxy.Candidate{Addr: addr, Kind: kind, Source: s.ID, Country: e.Country})
+		if e.HTTP == "1" || e.SSL == "1" {
+			out = append(out, proxy.Candidate{Addr: addr, Kind: proxy.KindHTTP, Source: s.ID, Country: e.Country})
+		}
+		if e.Socks5 == "1" {
+			out = append(out, proxy.Candidate{Addr: addr, Kind: proxy.KindSOCKS5, Source: s.ID, Country: e.Country})
+		}
 	}
-	return out
+	return out, nil
 }
 
-func parseGeonode(data []byte, s Source) []proxy.Candidate {
+func parseGeonode(data []byte, s Source) ([]proxy.Candidate, error) {
 	var payload struct {
 		Data []struct {
 			IP        string   `json:"ip"`
@@ -325,59 +373,63 @@ func parseGeonode(data []byte, s Source) []proxy.Candidate {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil
+		return nil, err
 	}
 	var out []proxy.Candidate
 	for _, e := range payload.Data {
-		kind := s.Kind
-		for _, p := range e.Protocols {
-			switch strings.ToLower(p) {
-			case "socks5", "socks4":
-				kind = proxy.KindSOCKS5
-			case "https", "http":
-				kind = proxy.KindHTTP
-			}
+		addr := normaliseAddr(e.IP + ":" + e.Port)
+		if addr == "" {
+			continue
 		}
-		out = append(out, proxy.Candidate{
-			Addr:    normaliseAddr(e.IP + ":" + e.Port),
-			Kind:    kind,
-			Source:  s.ID,
-			Country: e.Country,
-		})
+		seen := map[string]bool{}
+		for _, p := range e.Protocols {
+			kind := kindFromProtocol(p, "")
+			if kind == "" || seen[kind] {
+				continue
+			}
+			seen[kind] = true
+			out = append(out, proxy.Candidate{Addr: addr, Kind: kind, Source: s.ID, Country: e.Country})
+		}
 	}
-	return out
+	return out, nil
 }
 
-func parseProxifly(data []byte, s Source) []proxy.Candidate {
+func parseProxifly(data []byte, s Source) ([]proxy.Candidate, error) {
 	var payload []struct {
 		Proxy    string `json:"proxy"`
 		Protocol string `json:"protocol"`
 		Country  string `json:"geolocation"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil
+		return nil, err
 	}
 	var out []proxy.Candidate
 	for _, e := range payload {
 		kind := kindFromProtocol(e.Protocol, s.Kind)
+		addr := normaliseAddr(e.Proxy)
+		if kind == "" || addr == "" {
+			continue
+		}
 		out = append(out, proxy.Candidate{
-			Addr:    normaliseAddr(e.Proxy),
+			Addr:    addr,
 			Kind:    kind,
 			Source:  s.ID,
 			Country: e.Country,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func kindFromProtocol(p, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "socks5", "socks4":
+	case "socks5":
 		return proxy.KindSOCKS5
 	case "http", "https":
 		return proxy.KindHTTP
+	case "":
+		return fallback
 	}
-	return fallback
+	return ""
 }
 
 // normaliseAddr strips scheme prefixes and validates host:port shape.
@@ -404,5 +456,9 @@ func normaliseAddr(raw string) string {
 			return ""
 		}
 	}
-	return host + ":" + port
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 || strings.ContainsAny(host, "/@?#") {
+		return ""
+	}
+	return host + ":" + strconv.Itoa(n)
 }

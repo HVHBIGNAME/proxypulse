@@ -2,6 +2,7 @@
 *.exe
 /proxypulse
 /proxypulse-gui
+/dist/
 
 # build resources (generated)
 /cmd/proxypulse-gui/rsrc.syso

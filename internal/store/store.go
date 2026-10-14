@@ -6,6 +6,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,14 +38,15 @@ func Open(path string) (*DB, error) {
 		Results []proxy.Result `json:"results"`
 	}
 	// Tolerate a bare array as well as the wrapper object.
-	if err := json.Unmarshal(data, &saved); err != nil || len(saved.Results) == 0 {
+	if err := json.Unmarshal(data, &saved); err != nil {
 		var bare []proxy.Result
-		if json.Unmarshal(data, &bare) == nil {
-			saved.Results = bare
+		if err := json.Unmarshal(data, &bare); err != nil {
+			return nil, fmt.Errorf("decode cache: %w", err)
 		}
+		saved.Results = bare
 	}
 	for _, r := range saved.Results {
-		d.byID[key(r.Kind, r.Addr)] = r
+		upsert(d.byID, r)
 	}
 	return d, nil
 }
@@ -53,18 +55,33 @@ func Open(path string) (*DB, error) {
 func (d *DB) Save(rs []proxy.Result) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	updated := maps.Clone(d.byID)
 	for _, r := range rs {
-		d.byID[key(r.Kind, r.Addr)] = r
+		upsert(updated, r)
 	}
-	return d.flush()
+	if err := d.flush(updated); err != nil {
+		return err
+	}
+	d.byID = updated
+	return nil
 }
 
-func (d *DB) flush() error {
-	if dir := filepath.Dir(d.path); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+func upsert(rows map[string]proxy.Result, r proxy.Result) {
+	id := key(r.Kind, r.Addr)
+	if old, ok := rows[id]; ok && old.CheckedAt.After(r.CheckedAt) {
+		return
 	}
-	list := make([]proxy.Result, 0, len(d.byID))
-	for _, r := range d.byID {
+	rows[id] = r
+}
+
+func (d *DB) flush(rows map[string]proxy.Result) error {
+	if dir := filepath.Dir(d.path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	list := make([]proxy.Result, 0, len(rows))
+	for _, r := range rows {
 		list = append(list, r)
 	}
 	data, err := json.Marshal(struct {
@@ -73,11 +90,19 @@ func (d *DB) flush() error {
 	if err != nil {
 		return err
 	}
-	tmp := d.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(d.path), filepath.Base(d.path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, d.path) // atomic replace
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), d.path)
 }
 
 // Top returns the n fastest alive proxies.
@@ -134,5 +159,5 @@ func ExportText(path string, rs []proxy.Result) error {
 			return err
 		}
 	}
-	return nil
+	return f.Close()
 }
