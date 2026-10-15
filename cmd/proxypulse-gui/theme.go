@@ -8,19 +8,30 @@ import (
 	"github.com/lxn/walk"
 )
 
+// Dark surfaces share one palette; ink is reserved for text on the teal action.
 var (
-	navy       = walk.RGB(12, 21, 36)
-	panel      = walk.RGB(21, 35, 54)
-	border     = walk.RGB(41, 60, 80)
-	teal       = walk.RGB(57, 218, 190)
-	tealDark   = walk.RGB(17, 94, 87)
-	white      = walk.RGB(239, 246, 252)
-	muted      = walk.RGB(156, 177, 198)
-	paper      = walk.RGB(246, 249, 252)
-	ink        = walk.RGB(25, 43, 62)
-	secondary  = walk.RGB(82, 101, 119)
-	warning    = walk.RGB(250, 195, 111)
-	errorColor = walk.RGB(255, 153, 156)
+	navy         = walk.RGB(12, 21, 36) // window backdrop, behind every panel
+	surface      = walk.RGB(19, 30, 45) // settings and results panels
+	panel        = walk.RGB(25, 40, 60) // cards, header strip, menu bar
+	field        = walk.RGB(14, 23, 36) // text inputs and the table canvas
+	rowAlt       = walk.RGB(22, 34, 50) // alternating table rows
+	control      = walk.RGB(31, 47, 65) // button, spin button and combo arrow faces
+	hover        = walk.RGB(41, 61, 81) // pointer over an enabled control
+	pressed      = walk.RGB(24, 37, 52) // control held down
+	border       = walk.RGB(42, 61, 83) // resting outlines and column dividers
+	headerBg     = walk.RGB(26, 41, 62) // table header strip
+	scrollBg     = walk.RGB(20, 32, 47) // scrollbar tracks
+	selection    = walk.RGB(26, 84, 83) // selected row or combo item while focused
+	fadedRow     = walk.RGB(44, 62, 82) // selected row while the table is unfocused
+	teal         = walk.RGB(56, 214, 190)
+	tealDark     = walk.RGB(17, 94, 87)
+	white        = walk.RGB(224, 232, 241)
+	secondary    = walk.RGB(163, 181, 202)
+	muted        = walk.RGB(142, 161, 184)
+	disabledText = walk.RGB(108, 126, 147)
+	ink          = walk.RGB(10, 31, 35)
+	warning      = walk.RGB(240, 186, 104)
+	errorColor   = walk.RGB(244, 130, 136)
 )
 
 type theme struct {
@@ -32,7 +43,7 @@ type theme struct {
 
 func newTheme() (*theme, error) {
 	t := &theme{brushes: make(map[walk.Color]*walk.SolidColorBrush), pens: make(map[walk.Color]*walk.CosmeticPen), fonts: make(map[int]*walk.Font), scaledFonts: make(map[[2]int]*walk.Font)}
-	for _, color := range []walk.Color{navy, panel, border, teal, tealDark, white, muted, paper, ink, secondary, warning, errorColor} {
+	for _, color := range []walk.Color{navy, surface, panel, field, rowAlt, control, hover, pressed, border, headerBg, scrollBg, selection, fadedRow, teal, tealDark, white, secondary, muted, disabledText, ink, warning, errorColor} {
 		brush, err := walk.NewSolidColorBrush(color)
 		if err != nil {
 			t.dispose()
@@ -297,7 +308,7 @@ func (u *desktop) emptyText() (string, string) {
 
 func (u *desktop) paintEmpty(c *walk.Canvas, update walk.Rectangle) error {
 	p := painter{c: c, t: u.theme, dpi: u.empty.DPI()}
-	p.check(c.FillRectanglePixels(u.theme.brushes[paper], update))
+	p.check(c.FillRectanglePixels(u.theme.brushes[surface], update))
 	b := u.empty.ClientBounds()
 	y := max(8, (b.Height-108)/2)
 	p.round(tealDark, b.Width/2-20, y, 40, 32, 12)
@@ -307,7 +318,7 @@ func (u *desktop) paintEmpty(c *walk.Canvas, update walk.Rectangle) error {
 	p.line(teal, b.Width/2+5, y+24, b.Width/2+10, y+17)
 	title, detail := u.emptyText()
 	for i, text := range []string{title, detail} {
-		size, color := 13, ink
+		size, color := 13, white
 		if i == 1 {
 			size, color = 10, secondary
 		}
@@ -318,33 +329,37 @@ func (u *desktop) paintEmpty(c *walk.Canvas, update walk.Rectangle) error {
 
 type cellStyler struct{ u *desktop }
 
+// StyleCell is the fallback palette for Walk's own table painting. The native
+// subclass in dark_table.go normally draws every cell itself; keeping these
+// colors dark means an unhandled path can never flash a light row.
 func (s cellStyler) StyleCell(style *walk.CellStyle) {
 	r, ok := s.u.model.result(style.Row())
 	if !ok {
+		style.BackgroundColor = field
+		style.TextColor = white
 		return
 	}
-	// Leave both foreground and background to Windows for selected rows,
-	// including unfocused selection and high-contrast system themes.
-	if s.u.tv != nil && style.Row() == s.u.tv.CurrentIndex() {
-		return
-	}
-	style.BackgroundColor = walk.RGB(255, 255, 255)
+	style.BackgroundColor = field
 	if style.Row()%2 != 0 {
-		style.BackgroundColor = paper
+		style.BackgroundColor = rowAlt
 	}
-	style.TextColor = ink
-	switch style.Col() {
+	style.TextColor = resultTextColor(r, style.Col())
+}
+
+func resultTextColor(r proxy.Result, col int) walk.Color {
+	switch col {
 	case 0:
-		style.TextColor = secondary
+		return muted
 	case 3:
 		if r.LatencyMs < 500 {
-			style.TextColor = walk.RGB(0, 112, 93)
+			return teal
 		} else if r.LatencyMs >= 1500 {
-			style.TextColor = walk.RGB(151, 77, 26)
+			return warning
 		}
 	case 5:
 		if r.Anonymity == proxy.AnonTransparent {
-			style.TextColor = walk.RGB(173, 54, 57)
+			return errorColor
 		}
 	}
+	return white
 }

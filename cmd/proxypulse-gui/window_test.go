@@ -27,10 +27,20 @@ func TestNativeDesktop(t *testing.T) {
 	}
 	defer db.Close()
 	u := newDesktop(db, dir)
+	hookMu.Lock()
+	initialHooks := len(hookTable)
+	hookMu.Unlock()
 	if err := u.create(); err != nil {
 		t.Fatal(err)
 	}
-	defer u.dispose()
+	defer func() {
+		u.dispose()
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		if len(hookTable) != initialHooks {
+			t.Errorf("native color hooks leaked after window disposal: %d", len(hookTable)-initialHooks)
+		}
+	}()
 	if u.preset.CurrentIndex() != 1 || u.limit.Value() != 1500 || !u.speed.Checked() || !u.anon.Checked() {
 		t.Error("default profile did not initialize consistently")
 	}
@@ -114,6 +124,20 @@ func TestNativeDesktop(t *testing.T) {
 	}
 	u.mw.Starting().Attach(func() {
 		go func() {
+			onUI(func() {
+				for _, widget := range []walk.Widget{u.preset, u.quality, u.speed, u.copy} {
+					win.InvalidateRect(widget.Handle(), nil, true)
+					win.UpdateWindow(widget.Handle())
+					invalid, _, _ := user32.NewProc("GetUpdateRect").Call(uintptr(widget.Handle()), 0, 0)
+					if invalid != 0 {
+						t.Errorf("paint did not validate %T; it would repaint continuously", widget)
+					}
+				}
+				info := comboInfo(u.preset.Handle())
+				if info.List == 0 || u.native.hooks[info.List] == nil {
+					t.Error("native combo popup is missing its dark renderer")
+				}
+			})
 			for i, key := range []walk.Key{walk.KeyReturn, walk.KeySpace} {
 				onUI(func() {
 					u.primary.widget.SetFocus()

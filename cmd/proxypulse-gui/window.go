@@ -57,6 +57,7 @@ type desktop struct {
 	copyAction, recheckAction   *walk.Action
 	animated                    bool
 	animationInterval           uint32
+	native                      *darkControls
 }
 
 func newDesktop(db *store.DB, dir string) *desktop {
@@ -94,6 +95,10 @@ func (u *desktop) create() error {
 	}
 	u.applyingPreset = false
 	u.applyPreset()
+	if err := u.installDarkControls(); err != nil {
+		u.dispose()
+		return err
+	}
 	if err := u.installShortcuts(); err != nil {
 		u.dispose()
 		return err
@@ -135,14 +140,14 @@ func (u *desktop) create() error {
 
 func (u *desktop) settingsPanel() Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: paper},
+		Background: SolidColorBrush{Color: surface},
 		Layout:     VBox{Margins: Margins{Left: 12, Top: 9, Right: 12, Bottom: 9}, Spacing: 7},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 10}, Children: []Widget{
 				Label{Text: "ПРОФИЛЬ", TextColor: secondary, Font: Font{Bold: true}},
 				ComboBox{AssignTo: &u.preset, Model: []string{"Быстрый", "Баланс", "Глубокий", "Свой"}, CurrentIndex: 1, MinSize: Size{Width: 128}, MaxSize: Size{Width: 128}, OnCurrentIndexChanged: u.applyPreset, Accessibility: Accessibility{Name: "Профиль проверки"}, ToolTipText: "Быстрый: 500 без дополнительных тестов; Баланс: 1500; Глубокий: 5000"},
-				Label{Text: "Кандидатов", TextColor: ink},
-				NumberEdit{AssignTo: &u.limit, MinSize: Size{Width: 100}, MaxSize: Size{Width: 100}, MinValue: 1, MaxValue: 100000, Value: float64(1500), Increment: 500, Decimals: 0, SpinButtonsVisible: true, TextColor: ink, OnValueChanged: u.customPreset, Accessibility: Accessibility{Name: "Лимит кандидатов"}},
+				Label{Text: "Кандидатов", TextColor: white},
+				NumberEdit{AssignTo: &u.limit, Background: SolidColorBrush{Color: field}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 100}, MinValue: 1, MaxValue: 100000, Value: float64(1500), Increment: 500, Decimals: 0, SpinButtonsVisible: true, TextColor: white, OnValueChanged: u.customPreset, Accessibility: Accessibility{Name: "Лимит кандидатов"}},
 				HSpacer{},
 				CheckBox{AssignTo: &u.speed, Text: "Замер скорости", Checked: true, OnCheckedChanged: u.customPreset, ToolTipText: "Дополнительный тест для 60 самых быстрых прокси"},
 				CheckBox{AssignTo: &u.anon, Text: "Анонимность", Checked: true, OnCheckedChanged: u.customPreset, ToolTipText: "Дополнительный тест для 150 самых быстрых прокси"},
@@ -162,24 +167,24 @@ func (u *desktop) resultsPanel() Widget {
 	return Composite{
 		// Walk counts fixed-size painted siblings as greedy too. Give spare
 		// height to results instead of distributing it into inter-panel gaps.
-		StretchFactor: 1000, Background: SolidColorBrush{Color: paper},
+		StretchFactor: 1000, Background: SolidColorBrush{Color: surface},
 		Layout: VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 7},
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 12}, Children: []Widget{
-				Label{Text: "Рабочие прокси", Font: Font{PointSize: 12, Bold: true}, TextColor: ink},
+				Label{Text: "Рабочие прокси", Font: Font{PointSize: 12, Bold: true}, TextColor: white},
 				Label{AssignTo: &u.counts, Text: "0 из 0", TextColor: secondary},
 				HSpacer{},
 				Label{Text: "Заголовок — сортировка  •  Двойной клик — копировать", TextColor: secondary},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
-				LineEdit{AssignTo: &u.search, CueBanner: "Поиск: адрес, страна, IP, источник…", StretchFactor: 1, MinSize: Size{Width: 235}, TextColor: ink, OnTextChanged: u.filterResults, Accessibility: Accessibility{Name: "Поиск по результатам"}, ToolTipText: "Ctrl+F • можно ввести несколько слов"},
+				LineEdit{AssignTo: &u.search, Background: SolidColorBrush{Color: field}, CueBanner: "Поиск: адрес, страна, IP, источник…", StretchFactor: 1, MinSize: Size{Width: 235}, TextColor: white, OnTextChanged: u.filterResults, Accessibility: Accessibility{Name: "Поиск по результатам"}, ToolTipText: "Ctrl+F • можно ввести несколько слов"},
 				ComboBox{AssignTo: &u.kind, Model: []string{"Все протоколы", "HTTP", "SOCKS5"}, CurrentIndex: 0, MinSize: Size{Width: 140}, MaxSize: Size{Width: 140}, OnCurrentIndexChanged: u.filterResults, Accessibility: Accessibility{Name: "Фильтр протокола"}},
 				ComboBox{AssignTo: &u.quality, Model: []string{"Любое качество", "Пинг < 500 мс", "Только элитные", "С замером скорости"}, CurrentIndex: 0, MinSize: Size{Width: 178}, MaxSize: Size{Width: 178}, OnCurrentIndexChanged: u.filterResults, Accessibility: Accessibility{Name: "Фильтр качества"}},
 				PushButton{Text: "Сбросить", MinSize: Size{Width: 85, Height: 28}, OnClicked: u.clearFilters},
 			}},
 			CustomWidget{AssignTo: &u.empty, StretchFactor: 1, MinSize: Size{Height: 120}, PaintMode: PaintBuffered, PaintPixels: u.paintEmpty, InvalidatesOnResize: true, Accessibility: Accessibility{Name: "Результатов пока нет", Role: AccRoleStatictext}},
 			TableView{
-				AssignTo: &u.tv, Model: u.model, CellStyler: cellStyler{u}, Visible: false,
+				AssignTo: &u.tv, Model: u.model, CellStyler: cellStyler{u}, Visible: false, Background: SolidColorBrush{Color: field},
 				MinSize: Size{Height: 120}, StretchFactor: 1, ColumnsOrderable: true, ColumnsSizable: true,
 				CustomRowHeight: 29, CustomHeaderHeight: 30, LastColumnStretched: true,
 				OnCurrentIndexChanged: u.selectionChanged, OnItemActivated: u.copySelected,
@@ -208,8 +213,8 @@ func (u *desktop) resultsPanel() Widget {
 				PushButton{AssignTo: &u.export, Text: "Экспорт всех…", MinSize: Size{Width: 125, Height: 30}, OnClicked: func() { u.saveResults(false) }},
 			}},
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 10}, Children: []Widget{
-				Label{Text: "ЛУЧШИЙ", Font: Font{Bold: true}, TextColor: tealDark},
-				LineEdit{AssignTo: &u.best, ReadOnly: true, Text: "Появится после проверки", Background: SolidColorBrush{Color: paper}, TextColor: ink, StretchFactor: 1, Accessibility: Accessibility{Name: "Самый быстрый прокси"}},
+				Label{Text: "ЛУЧШИЙ", Font: Font{Bold: true}, TextColor: teal},
+				LineEdit{AssignTo: &u.best, ReadOnly: true, Text: "Появится после проверки", Background: SolidColorBrush{Color: field}, TextColor: white, StretchFactor: 1, Accessibility: Accessibility{Name: "Самый быстрый прокси"}},
 				PushButton{AssignTo: &u.copyBest, Text: "Копировать лучший", MinSize: Size{Width: 165, Height: 30}, Font: Font{Bold: true}, OnClicked: u.copyTop, ToolTipText: "Самый быстрый из всех рабочих прокси, независимо от фильтров"},
 			}},
 		},
@@ -512,6 +517,9 @@ func (u *desktop) dispose() {
 	u.shutdown()
 	if u.mw != nil {
 		u.mw.Dispose()
+	}
+	if u.native != nil {
+		u.native.dispose()
 	}
 	u.workers.Wait()
 	if u.theme != nil {
