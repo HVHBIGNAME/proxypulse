@@ -54,10 +54,14 @@ func (o *Options) withDefaults() {
 
 // Fetch pulls candidates from the selected sources.
 func Fetch(ctx context.Context, selected []string, timeout time.Duration) ([]proxy.Candidate, []sources.FetchResult, error) {
+	return FetchWithCap(ctx, selected, timeout, sources.DefaultCapPerSource)
+}
+
+func FetchWithCap(ctx context.Context, selected []string, timeout time.Duration, perSource int) ([]proxy.Candidate, []sources.FetchResult, error) {
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	return sources.FetchAll(ctx, selected, timeout, 10)
+	return sources.FetchAllWithCap(ctx, selected, timeout, 12, perSource)
 }
 
 // Validate tests every candidate with the given concurrency, invoking onResult

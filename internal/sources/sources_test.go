@@ -152,7 +152,7 @@ func TestCapSampleSpread(t *testing.T) {
 
 func TestRegistryKindsAreValid(t *testing.T) {
 	reg := Registry()
-	if len(reg) < 18 {
+	if len(reg) < 57 {
 		t.Fatalf("registry has %d pools, expected the expanded set", len(reg))
 	}
 	seen := map[string]bool{}
@@ -201,7 +201,7 @@ func TestFetchSourcesInterleavesUniqueCappedCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stats) != 3 || stats[0].Count != 2 || stats[1].Count != 2 || stats[2].Count != 0 || stats[2].Err == nil {
+	if len(stats) != 3 || stats[0].Count != 2 || stats[0].Available != 3 || stats[1].Count != 2 || stats[2].Count != 0 || stats[2].Err == nil {
 		t.Fatalf("unexpected fetch stats: %+v", stats)
 	}
 	want := []string{"http://10.0.0.1:80", "http://10.0.0.2:80", "http://10.0.0.4:80"}
@@ -215,6 +215,52 @@ func TestFetchSourcesInterleavesUniqueCappedCandidates(t *testing.T) {
 	}
 	if got[1].Source != "b" {
 		t.Error("dedup did not preserve the first round-robin occurrence")
+	}
+}
+
+func TestProxiflyCurrentGeolocationSchema(t *testing.T) {
+	body := []byte(`[
+		{"proxy":"http://198.51.100.8:8080","protocol":"http","geolocation":{"country":"DE","city":"Berlin"}},
+		{"proxy":"socks5://198.51.100.9:1080","protocol":"socks5","geolocation":{"country":"NL"}},
+		{"proxy":"socks4://198.51.100.10:1080","protocol":"socks4","geolocation":null}
+	]`)
+	got, err := parseProxifly(body, Source{ID: "proxifly-http", Kind: proxy.KindHTTP})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("current Proxifly payload: %v, %v", got, err)
+	}
+	if got[0].Country != "DE" || got[1].Country != "NL" || got[1].Kind != proxy.KindSOCKS5 {
+		t.Fatalf("lost protocol or location: %+v", got)
+	}
+}
+
+func TestCompleteSourceRetainsTailBeyondDefaultCap(t *testing.T) {
+	var body strings.Builder
+	for port := 1; port <= DefaultCapPerSource+51; port++ {
+		fmt.Fprintf(&body, "198.51.100.8:%d\n", port)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body.String()) }))
+	defer srv.Close()
+	source := Source{ID: "large", Kind: proxy.KindHTTP, URL: srv.URL}
+	limited, stats, err := fetchSources(context.Background(), []Source{source}, time.Second, 1)
+	if err != nil || len(limited) != DefaultCapPerSource || stats[0].Available != DefaultCapPerSource+51 {
+		t.Fatalf("sampled source: %d, %+v, %v", len(limited), stats, err)
+	}
+	source.Cap = -1
+	all, _, err := fetchSources(context.Background(), []Source{source}, time.Second, 1)
+	if err != nil || len(all) != DefaultCapPerSource+51 || all[len(all)-1].Addr != fmt.Sprintf("198.51.100.8:%d", DefaultCapPerSource+51) {
+		t.Fatalf("complete source was truncated: %d, %v", len(all), err)
+	}
+}
+
+func TestSourceSelectionAndUncappedMode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, stats, err := FetchAllWithCap(ctx, []string{"monosans-http"}, time.Second, 1, 0)
+	if !errors.Is(err, context.Canceled) || len(stats) != 1 || stats[0].Source.ID != "monosans-http" || stats[0].Source.Cap != -1 {
+		t.Fatalf("selection escaped its scope: %+v, %v", stats, err)
+	}
+	if _, _, err := FetchAllWithCap(ctx, []string{"monosans-http", "no-such-source"}, time.Second, 1, 10); err == nil || !strings.Contains(err.Error(), "unknown sources") {
+		t.Fatalf("unknown source was ignored: %v", err)
 	}
 }
 

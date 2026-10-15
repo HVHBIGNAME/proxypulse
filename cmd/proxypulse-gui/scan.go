@@ -9,6 +9,7 @@ import (
 
 	"github.com/HVHBIGNAME/proxypulse/internal/app"
 	"github.com/HVHBIGNAME/proxypulse/internal/proxy"
+	"github.com/HVHBIGNAME/proxypulse/internal/sources"
 	"github.com/HVHBIGNAME/proxypulse/internal/store"
 )
 
@@ -36,6 +37,7 @@ type scanUpdate struct {
 	done      int
 	total     int
 	pools     int
+	available int
 	results   []proxy.Result
 	message   string
 	finished  bool
@@ -67,7 +69,11 @@ func (m *scanMailbox) take() *scanUpdate {
 }
 
 func runScan(ctx context.Context, settings scanSettings, db *store.DB, updates *scanMailbox) {
-	candidates, fetches, err := app.Fetch(ctx, nil, 25*time.Second)
+	perSource := sources.DefaultCapPerSource
+	if settings.limit == 0 {
+		perSource = 0
+	}
+	candidates, fetches, err := app.FetchWithCap(ctx, nil, 25*time.Second, perSource)
 	if ctx.Err() != nil {
 		updates.put(scanUpdate{phase: phaseStopped, finished: true, unchanged: true, message: "Поиск остановлен. Можно начать снова."})
 		return
@@ -78,7 +84,7 @@ func runScan(ctx context.Context, settings scanSettings, db *store.DB, updates *
 	}
 	pools := 0
 	for _, f := range fetches {
-		if f.Err == nil {
+		if f.Err == nil && f.Count > 0 {
 			pools++
 		}
 	}
@@ -86,11 +92,12 @@ func runScan(ctx context.Context, settings scanSettings, db *store.DB, updates *
 		updates.put(scanUpdate{phase: phaseError, finished: true, unchanged: true, message: "Источники не вернули кандидатов. Проверьте подключение и повторите поиск."})
 		return
 	}
-	if len(candidates) > settings.limit {
+	available := len(candidates)
+	if settings.limit > 0 && len(candidates) > settings.limit {
 		candidates = candidates[:settings.limit]
 	}
 	total := len(candidates)
-	updates.put(scanUpdate{phase: phaseCheck, total: total, pools: pools})
+	updates.put(scanUpdate{phase: phaseCheck, total: total, pools: pools, available: available})
 	opt := app.Options{Workers: 400, Timeout: 4 * time.Second, SpeedTest: settings.speed, SpeedTop: 60, Anonymity: settings.anon, AnonTop: 150}
 	var mu sync.Mutex
 	var done int
@@ -112,19 +119,19 @@ func runScan(ctx context.Context, settings scanSettings, db *store.DB, updates *
 		if time.Since(last) >= 200*time.Millisecond {
 			snapshot := slices.Clone(live)
 			app.Sort(snapshot)
-			updates.put(scanUpdate{phase: phaseCheck, done: done, total: total, pools: pools, results: snapshot})
+			updates.put(scanUpdate{phase: phaseCheck, done: done, total: total, pools: pools, available: available, results: snapshot})
 			last = time.Now()
 		}
 	})
 	app.Sort(validated)
 	if ctx.Err() == nil && len(validated) > 0 && (settings.anon || settings.speed) {
-		updates.put(scanUpdate{phase: phaseEnrich, done: done, total: total, pools: pools, results: slices.Clone(validated)})
+		updates.put(scanUpdate{phase: phaseEnrich, done: done, total: total, pools: pools, available: available, results: slices.Clone(validated)})
 		if settings.anon {
 			opt.DirectIP = proxy.RealIP(ctx, proxy.DefaultIPURL, 6*time.Second)
 		}
 		validated = app.Finalise(ctx, validated, opt)
 	}
-	u := scanUpdate{phase: phaseDone, done: done, total: total, pools: pools, results: validated, finished: true}
+	u := scanUpdate{phase: phaseDone, done: done, total: total, pools: pools, available: available, results: validated, finished: true}
 	switch {
 	case ctx.Err() != nil:
 		u.phase = phaseStopped

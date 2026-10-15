@@ -203,6 +203,9 @@ func (u *desktop) paintCards(c *walk.Canvas, update walk.Rectangle) error {
 	if u.total > 0 {
 		values[0] = fmt.Sprintf("%d / %d", u.done, u.total)
 		hints[0] = fmt.Sprintf("Проверено • источников: %d", u.pools)
+		if u.available > 0 {
+			hints[0] = fmt.Sprintf("Собрано %d • пулов: %d", u.available, u.pools)
+		}
 		if u.rechecking {
 			hints[0] = "Перепроверка выбранного прокси"
 		}

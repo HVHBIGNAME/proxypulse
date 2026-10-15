@@ -3,12 +3,52 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCheckRejectsUntrustedHTTPSInterception(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "203.0.113.7") }))
+	defer upstream.Close()
+	tunnel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT required", 405)
+			return
+		}
+		remote, err := net.DialTimeout("tcp", upstream.Listener.Addr().String(), time.Second)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer remote.Close()
+		client, buffer, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer client.Close()
+		fmt.Fprint(buffer, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		if err := buffer.Flush(); err != nil {
+			return
+		}
+		done := make(chan struct{})
+		go func() { io.Copy(remote, buffer); remote.Close(); close(done) }()
+		io.Copy(client, remote)
+		client.Close()
+		<-done
+	}))
+	defer tunnel.Close()
+	c := Candidate{Addr: tunnel.Listener.Addr().String(), Kind: KindHTTP}
+	result := Check(context.Background(), c, upstream.URL, 3*time.Second)
+	if result.Alive || result.Err == "" || !strings.Contains(result.Err, "certificate") {
+		t.Fatalf("untrusted TLS was accepted as a good proxy: %+v", result)
+	}
+}
 
 func TestCheckRejectsInvalidAndIncompleteResponses(t *testing.T) {
 	for _, tc := range []struct {

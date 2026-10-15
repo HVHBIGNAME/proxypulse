@@ -41,7 +41,7 @@ func TestNativeDesktop(t *testing.T) {
 			t.Errorf("native color hooks leaked after window disposal: %d", len(hookTable)-initialHooks)
 		}
 	}()
-	if u.preset.CurrentIndex() != 1 || u.limit.Value() != 1500 || !u.speed.Checked() || !u.anon.Checked() {
+	if u.preset.CurrentIndex() != 1 || u.limit.Value() != 10000 || !u.speed.Checked() || !u.anon.Checked() {
 		t.Error("default profile did not initialize consistently")
 	}
 	if u.copy.Enabled() || u.recheck.Enabled() || u.export.Enabled() || u.copyBest.Enabled() || !u.empty.Visible() {
@@ -55,11 +55,15 @@ func TestNativeDesktop(t *testing.T) {
 	}
 	u.mw.SetSize(walk.Size{Width: 1000, Height: 680})
 	u.preset.SetCurrentIndex(0)
-	if u.limit.Value() != 500 || u.speed.Checked() || u.anon.Checked() {
+	if u.limit.Value() != 1500 || u.speed.Checked() || u.anon.Checked() {
 		t.Error("quick preset did not apply")
 	}
+	u.preset.SetCurrentIndex(3)
+	if u.limit.Value() != 0 || !u.speed.Checked() || !u.anon.Checked() {
+		t.Error("full-pool preset must remove the candidate limit and retain quality checks")
+	}
 	u.limit.SetValue(123)
-	if u.preset.CurrentIndex() != 3 {
+	if u.preset.CurrentIndex() != 4 {
 		t.Error("manual limit did not select custom profile")
 	}
 	ctx, ok := u.begin(phaseCheck)

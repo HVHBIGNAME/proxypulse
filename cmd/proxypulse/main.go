@@ -41,6 +41,7 @@ func run(ctx context.Context, args []string) error {
 		workers     = flags.Int("workers", 300, "concurrent proxy checks")
 		timeout     = flags.Duration("timeout", 4*time.Second, "per-proxy timeout")
 		limit       = flags.Int("limit", 0, "max candidates to test (0 = all)")
+		sourceCap   = flags.Int("source-cap", sources.DefaultCapPerSource, "max candidates per source (0 = complete lists)")
 		top         = flags.Int("top", 10, "how many results to print")
 		speed       = flags.Bool("speed", true, "measure throughput of survivors")
 		anon        = flags.Bool("anon", true, "classify anonymity of survivors")
@@ -74,6 +75,8 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("-timeout must be greater than zero (got %s)", *timeout)
 	case *limit < 0:
 		return fmt.Errorf("-limit must be non-negative; 0 means all candidates (got %d)", *limit)
+	case *sourceCap < 0:
+		return fmt.Errorf("-source-cap must be non-negative; 0 means complete lists (got %d)", *sourceCap)
 	case *format != "text" && *format != "json":
 		return fmt.Errorf("unsupported -format %q: use text or json", *format)
 	}
@@ -107,7 +110,7 @@ func run(ctx context.Context, args []string) error {
 
 	var cands []proxy.Candidate
 	if *dbOnly {
-		cached, err := db.Top(100000)
+		cached, err := db.Top(0)
 		if err != nil {
 			return err
 		}
@@ -117,14 +120,18 @@ func run(ctx context.Context, args []string) error {
 		progress("re-checking %d cached proxies\n", len(cands))
 	} else {
 		selected := splitCSV(*srcFlag)
-		progress("fetching %d pool(s)...\n", len(sources.Registry()))
+		poolCount := len(sources.Registry())
+		if len(selected) > 0 {
+			poolCount = len(selected)
+		}
+		progress("fetching %d pool(s)...\n", poolCount)
 		var results []sources.FetchResult
-		cands, results, err = app.Fetch(ctx, selected, 25*time.Second)
+		cands, results, err = app.FetchWithCap(ctx, selected, 25*time.Second, *sourceCap)
 		if err != nil {
 			return err
 		}
 		for _, r := range results {
-			status := fmt.Sprintf("%d proxies", r.Count)
+			status := fmt.Sprintf("%d candidates / %d available", r.Count, r.Available)
 			if r.Err != nil {
 				status = "ERR " + r.Err.Error()
 			}

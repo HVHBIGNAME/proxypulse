@@ -18,7 +18,7 @@ import (
 
 // DefaultCapPerSource limits how many entries a single pool may contribute, so
 // one huge list (100k+ addresses) cannot crowd out the rest of the pools.
-const DefaultCapPerSource = 1200
+const DefaultCapPerSource = 10000
 
 // Source describes one upstream proxy pool.
 type Source struct {
@@ -27,13 +27,13 @@ type Source struct {
 	URL    string `json:"url"`
 	Kind   string `json:"kind"`   // default proxy kind for entries
 	Format string `json:"format"` // ipport | colon | vakhov | geonode | proxifly
-	Cap    int    `json:"cap"`    // max entries from this source (0 = DefaultCapPerSource)
+	Cap    int    `json:"cap"`    // 0 = default; negative = no sampling cap
 }
 
 // Registry lists the built-in public pools. All are plain public lists; the
 // tool always re-verifies every entry before it is shown to the user.
 func Registry() []Source {
-	return []Source{
+	pools := []Source{
 		// --- monosans ---
 		{ID: "monosans-http", Name: "monosans/http", Kind: proxy.KindHTTP, Format: "ipport",
 			URL: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"},
@@ -50,7 +50,7 @@ func Registry() []Source {
 		{ID: "roosterkid-socks5", Name: "roosterkid/socks5", Kind: proxy.KindSOCKS5, Format: "ipport",
 			URL: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt"},
 		// --- APIs with metadata ---
-		{ID: "proxifly-http", Name: "proxifly/http", Kind: proxy.KindHTTP, Format: "proxifly",
+		{ID: "proxifly-http", Name: "proxifly/http+socks5", Kind: proxy.KindHTTP, Format: "proxifly",
 			URL: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.json"},
 		{ID: "proxyscrape-http", Name: "proxyscrape/http", Kind: proxy.KindHTTP, Format: "ipport",
 			URL: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text"},
@@ -94,14 +94,24 @@ func Registry() []Source {
 		{ID: "prxchk-socks5", Name: "prxchk/socks5", Kind: proxy.KindSOCKS5, Format: "ipport",
 			URL: "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt"},
 	}
+	pools = append(pools, additionalSources()...)
+	for page := 2; page <= 5; page++ {
+		pools = append(pools, Source{
+			ID: fmt.Sprintf("geonode-%d", page), Name: fmt.Sprintf("geonode/page-%d", page),
+			Kind: proxy.KindHTTP, Format: "geonode",
+			URL: fmt.Sprintf("https://proxylist.geonode.com/api/proxy-list?limit=500&page=%d&sort_by=lastChecked&sort_type=desc", page),
+		})
+	}
+	return pools
 }
 
 // FetchResult reports per-source fetch outcome.
 type FetchResult struct {
-	Source   Source
-	Count    int
-	Err      error
-	Duration time.Duration
+	Source    Source
+	Count     int
+	Available int // unique entries before per-source sampling
+	Err       error
+	Duration  time.Duration
 }
 
 // FetchAll downloads all selected sources in parallel and returns deduplicated
@@ -109,6 +119,14 @@ type FetchResult struct {
 // round-robin, so no single source dominates the front of the list. Passing an
 // empty selection uses every source.
 func FetchAll(ctx context.Context, selected []string, timeout time.Duration, workers int) ([]proxy.Candidate, []FetchResult, error) {
+	return FetchAllWithCap(ctx, selected, timeout, workers, DefaultCapPerSource)
+}
+
+// FetchAllWithCap uses an explicit per-source limit; zero keeps the complete lists.
+func FetchAllWithCap(ctx context.Context, selected []string, timeout time.Duration, workers, perSource int) ([]proxy.Candidate, []FetchResult, error) {
+	if perSource < 0 {
+		return nil, nil, fmt.Errorf("source cap must be non-negative")
+	}
 	reg := Registry()
 	want := map[string]bool{}
 	for _, id := range selected {
@@ -116,9 +134,17 @@ func FetchAll(ctx context.Context, selected []string, timeout time.Duration, wor
 	}
 	list := make([]Source, 0, len(reg))
 	for _, s := range reg {
-		if len(want) == 0 || want[s.ID] {
+		if len(selected) == 0 || want[s.ID] {
+			delete(want, s.ID)
+			s.Cap = perSource
+			if perSource == 0 {
+				s.Cap = -1
+			}
 			list = append(list, s)
 		}
+	}
+	if len(want) > 0 {
+		return nil, nil, fmt.Errorf("unknown sources: %v", selected)
 	}
 	if len(list) == 0 {
 		return nil, nil, fmt.Errorf("no sources selected")
@@ -136,10 +162,11 @@ func fetchSources(ctx context.Context, list []Source, timeout time.Duration, wor
 
 	cl := &http.Client{Timeout: timeout}
 	type fetched struct {
-		src Source
-		got []proxy.Candidate
-		err error
-		dur time.Duration
+		src       Source
+		got       []proxy.Candidate
+		err       error
+		dur       time.Duration
+		available int
 	}
 	perSource := make([]fetched, len(list))
 
@@ -168,7 +195,8 @@ fetchLoop:
 			defer func() { <-sem }()
 			start := time.Now()
 			got, err := fetchOne(ctx, cl, s)
-			perSource[i] = fetched{src: s, got: got, err: err, dur: time.Since(start)}
+			available := len(got)
+			perSource[i] = fetched{src: s, got: capSample(got, s.Cap), available: available, err: err, dur: time.Since(start)}
 		}(next, list[next])
 	}
 	for i := next; i < len(list); i++ {
@@ -182,34 +210,27 @@ fetchLoop:
 		queues  [][]proxy.Candidate
 	)
 	for _, f := range perSource {
-		results = append(results, FetchResult{Source: f.src, Count: len(f.got), Err: f.err, Duration: f.dur})
+		results = append(results, FetchResult{Source: f.src, Count: len(f.got), Available: f.available, Err: f.err, Duration: f.dur})
 		queues = append(queues, f.got)
 	}
-	var cands []proxy.Candidate
+	seen := make(map[string]struct{})
+	var out []proxy.Candidate
 	for more := true; more; {
+		if ctx.Err() != nil {
+			return out, results, ctx.Err()
+		}
 		more = false
 		for i := range queues {
 			if len(queues[i]) > 0 {
-				cands = append(cands, queues[i][0])
+				c := queues[i][0]
 				queues[i] = queues[i][1:]
 				more = true
+				if _, duplicate := seen[c.Key()]; !duplicate && c.Addr != "" {
+					seen[c.Key()] = struct{}{}
+					out = append(out, c)
+				}
 			}
 		}
-	}
-
-	// Deduplicate, keeping the first (round-robin) occurrence.
-	seen := make(map[string]struct{}, len(cands))
-	out := make([]proxy.Candidate, 0, len(cands))
-	for _, c := range cands {
-		if c.Addr == "" {
-			continue
-		}
-		k := c.Key()
-		if _, ok := seen[k]; ok {
-			continue
-		}
-		seen[k] = struct{}{}
-		out = append(out, c)
 	}
 	return out, results, ctx.Err()
 }
@@ -267,13 +288,16 @@ func fetchOne(ctx context.Context, cl *http.Client, s Source) ([]proxy.Candidate
 		seen[c.Key()] = true
 		unique = append(unique, c)
 	}
-	return capSample(unique, s.Cap), nil
+	return unique, nil
 }
 
 // capSample limits a list to n entries spread evenly across it (not just the
-// head), so a 100k-entry pool still contributes a diverse 1200.
+// head), so a large pool contributes a diverse subset.
 func capSample(in []proxy.Candidate, n int) []proxy.Candidate {
-	if n <= 0 {
+	if n < 0 {
+		return in
+	}
+	if n == 0 {
 		n = DefaultCapPerSource
 	}
 	if len(in) <= n {
@@ -396,9 +420,9 @@ func parseGeonode(data []byte, s Source) ([]proxy.Candidate, error) {
 
 func parseProxifly(data []byte, s Source) ([]proxy.Candidate, error) {
 	var payload []struct {
-		Proxy    string `json:"proxy"`
-		Protocol string `json:"protocol"`
-		Country  string `json:"geolocation"`
+		Proxy    string       `json:"proxy"`
+		Protocol string       `json:"protocol"`
+		Country  proxyCountry `json:"geolocation"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, err
@@ -414,10 +438,33 @@ func parseProxifly(data []byte, s Source) ([]proxy.Candidate, error) {
 			Addr:    addr,
 			Kind:    kind,
 			Source:  s.ID,
-			Country: e.Country,
+			Country: string(e.Country),
 		})
 	}
 	return out, nil
+}
+
+// Proxifly now returns a country/city object; older saved lists used a string.
+type proxyCountry string
+
+func (c *proxyCountry) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var country string
+	if len(data) > 0 && data[0] == '{' {
+		var geo struct {
+			Country string `json:"country"`
+		}
+		if err := json.Unmarshal(data, &geo); err != nil {
+			return err
+		}
+		country = geo.Country
+	} else if err := json.Unmarshal(data, &country); err != nil {
+		return err
+	}
+	*c = proxyCountry(country)
+	return nil
 }
 
 func kindFromProtocol(p, fallback string) string {

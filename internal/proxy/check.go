@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -24,7 +23,6 @@ const (
 // transportFor builds an http.Transport routed through the given candidate.
 func transportFor(c Candidate, timeout time.Duration) (*http.Transport, error) {
 	t := &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		DisableKeepAlives:   true,
 		MaxIdleConnsPerHost: 1,
 		ForceAttemptHTTP2:   false,

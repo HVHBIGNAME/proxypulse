@@ -2,9 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +26,37 @@ import (
 	"github.com/HVHBIGNAME/proxypulse/internal/store"
 )
 
+var fixtureCertificate tls.Certificate
+
+func TestMain(m *testing.M) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsCA: true, BasicConstraintsValid: true,
+		DNSNames: []string{"api.ipify.org", "speed.cloudflare.com", "httpbin.org"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		panic(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(certificate)
+	if err := os.Setenv("GODEBUG", os.Getenv("GODEBUG")+",x509usefallbackroots=1"); err != nil {
+		panic(err)
+	}
+	x509.SetFallbackRoots(pool)
+	fixtureCertificate = tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	os.Exit(m.Run())
+}
+
 func TestInvalidScanArguments(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
@@ -32,6 +69,7 @@ func TestInvalidScanArguments(t *testing.T) {
 		{[]string{"-timeout=0"}, "-timeout must be greater than zero"},
 		{[]string{"-timeout=-1s"}, "-timeout must be greater than zero"},
 		{[]string{"-limit=-1"}, "-limit must be non-negative"},
+		{[]string{"-source-cap=-1"}, "-source-cap must be non-negative"},
 		{[]string{"-format=xml"}, "use text or json"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
@@ -256,7 +294,9 @@ func readCache(t *testing.T, path string) []proxy.Result {
 // Every CONNECT goes to this local TLS server, regardless of the requested host.
 func localProxy(t *testing.T, handler http.Handler) string {
 	t.Helper()
-	upstream := httptest.NewTLSServer(handler)
+	upstream := httptest.NewUnstartedServer(handler)
+	upstream.TLS = &tls.Config{Certificates: []tls.Certificate{fixtureCertificate}}
+	upstream.StartTLS()
 	t.Cleanup(upstream.Close)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {

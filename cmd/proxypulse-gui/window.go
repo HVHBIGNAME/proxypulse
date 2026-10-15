@@ -50,6 +50,7 @@ type desktop struct {
 	frame, progress             float64
 	started                     time.Time
 	done, total, pools          int
+	available                   int
 	selectionKey                string
 	refreshing                  bool
 	rechecking, enrichment      bool
@@ -145,9 +146,9 @@ func (u *desktop) settingsPanel() Widget {
 		Children: []Widget{
 			Composite{Layout: HBox{MarginsZero: true, Spacing: 10}, Children: []Widget{
 				Label{Text: "ПРОФИЛЬ", TextColor: secondary, Font: Font{Bold: true}},
-				ComboBox{AssignTo: &u.preset, Model: []string{"Быстрый", "Баланс", "Глубокий", "Свой"}, CurrentIndex: 1, MinSize: Size{Width: 128}, MaxSize: Size{Width: 128}, OnCurrentIndexChanged: u.applyPreset, Accessibility: Accessibility{Name: "Профиль проверки"}, ToolTipText: "Быстрый: 500 без дополнительных тестов; Баланс: 1500; Глубокий: 5000"},
+				ComboBox{AssignTo: &u.preset, Model: []string{"Быстрый", "Баланс", "Глубокий", "Весь пул", "Свой"}, CurrentIndex: 1, MinSize: Size{Width: 128}, MaxSize: Size{Width: 128}, OnCurrentIndexChanged: u.applyPreset, Accessibility: Accessibility{Name: "Профиль проверки"}, ToolTipText: "Быстрый: 1 500; Баланс: 10 000; Глубокий: 50 000; Весь пул: без ограничений сбора и проверки"},
 				Label{Text: "Кандидатов", TextColor: white},
-				NumberEdit{AssignTo: &u.limit, Background: SolidColorBrush{Color: field}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 100}, MinValue: 1, MaxValue: 100000, Value: float64(1500), Increment: 500, Decimals: 0, SpinButtonsVisible: true, TextColor: white, OnValueChanged: u.customPreset, Accessibility: Accessibility{Name: "Лимит кандидатов"}},
+				NumberEdit{AssignTo: &u.limit, Background: SolidColorBrush{Color: field}, MinSize: Size{Width: 100}, MaxSize: Size{Width: 100}, MinValue: 0, MaxValue: 200000, Value: float64(10000), Increment: 1000, Decimals: 0, SpinButtonsVisible: true, TextColor: white, OnValueChanged: u.customPreset, Accessibility: Accessibility{Name: "Лимит кандидатов; 0 — весь пул"}, ToolTipText: "0 — загрузить и проверить весь пул без выборки. Большие списки проверяются дольше."},
 				HSpacer{},
 				CheckBox{AssignTo: &u.speed, Text: "Замер скорости", Checked: true, OnCheckedChanged: u.customPreset, ToolTipText: "Дополнительный тест для 60 самых быстрых прокси"},
 				CheckBox{AssignTo: &u.anon, Text: "Анонимность", Checked: true, OnCheckedChanged: u.customPreset, ToolTipText: "Дополнительный тест для 150 самых быстрых прокси"},
@@ -226,19 +227,19 @@ func (u *desktop) applyPreset() {
 		return
 	}
 	i := u.preset.CurrentIndex()
-	if i < 0 || i > 2 {
+	if i < 0 || i > 3 {
 		return
 	}
 	u.applyingPreset = true
 	defer func() { u.applyingPreset = false }()
-	u.limit.SetValue([]float64{500, 1500, 5000}[i])
+	u.limit.SetValue([]float64{1500, 10000, 50000, 0}[i])
 	u.speed.SetChecked(i != 0)
 	u.anon.SetChecked(i != 0)
 }
 
 func (u *desktop) customPreset() {
 	if u.preset != nil && u.limit != nil && u.speed != nil && u.anon != nil && !u.applyingPreset {
-		u.preset.SetCurrentIndex(3)
+		u.preset.SetCurrentIndex(4)
 	}
 }
 
@@ -268,7 +269,7 @@ func (u *desktop) clearFilters() {
 }
 
 func (u *desktop) loadCache() {
-	results, err := u.db.Top(500)
+	results, err := u.db.Top(0)
 	if err != nil {
 		u.notify("Не удалось прочитать кэш: "+err.Error(), true)
 		return
@@ -387,7 +388,7 @@ func (u *desktop) startScan() {
 	if !ok {
 		return
 	}
-	u.done, u.total, u.pools = 0, 0, 0
+	u.done, u.total, u.pools, u.available = 0, 0, 0, 0
 	u.notify("Загрузка источников… Предыдущие результаты доступны до начала проверки.", false)
 	u.updateResultsUI()
 	u.cards.Invalidate()
@@ -443,6 +444,7 @@ func (u *desktop) timerInterval() uint32 {
 
 func (u *desktop) applyUpdate(update scanUpdate) {
 	u.phase, u.done, u.total, u.pools = update.phase, update.done, update.total, update.pools
+	u.available = update.available
 	if !update.unchanged {
 		if update.recheck {
 			if update.removed != "" {

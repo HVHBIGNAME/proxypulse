@@ -19,7 +19,7 @@ ProxyPulse скачивает публичные пулы прокси, пара
 
 ## Что делает
 
-- **Собирает** ~12 000 уникальных адресов из 23 пулов (HTTP и SOCKS5) параллельно, перемешивая их round-robin.
+- **Собирает** кандидатов из 57 публичных лент HTTP/SOCKS5 параллельно, удаляет дубликаты и перемешивает источники round-robin.
 - **Замеряет** пинг, скорость скачивания (КБ/с) и класс анонимности (elite/anonymous/transparent).
 - **Сортирует** по пингу и держит свежий результат; мёртвые не показываются.
 - **Отдаёт результат**: двойной клик — прокси в буфере; экспорт — список `.txt` или `.json`.
@@ -31,7 +31,7 @@ ProxyPulse скачивает публичные пулы прокси, пара
 
 ## Установка
 
-Скачайте **`ProxyPulse-1.0.1-windows-x64.zip`** из
+Скачайте **`ProxyPulse-1.1.0-windows-x64.zip`** из
 [релиза](https://github.com/HVHBIGNAME/proxypulse/releases/latest), распакуйте
 и откройте `proxypulse-gui.exe`. В ZIP также входит CLI `proxypulse.exe`.
 Можно скачать GUI отдельным EXE. Установка не нужна; Windows 10/11 x64.
@@ -50,7 +50,7 @@ go build -trimpath -ldflags "-s -w" -o proxypulse.exe ./cmd/proxypulse
 
 # GUI + CLI + ZIP + SHA-256 (из PowerShell, cmd или Bash)
 python -m pip install pillow==12.2.0
-python scripts/build_release.py --version 1.0.1
+python scripts/build_release.py --version 1.1.0
 ```
 
 Артефакты появятся в `dist/`. Например, для MinGW в `C:\mingw64` добавьте
@@ -85,10 +85,17 @@ go test ./cmd/proxypulse-gui -run TestNativeDesktop -count=1 -timeout 60s
 
 | Профиль | Кандидатов | Скорость / анонимность |
 |---------|------------|-----------------------|
-| Быстрый | 500 | выключены |
-| Баланс | 1500 | включены |
-| Глубокий | 5000 | включены |
-| Свой | 1–100 000 | настраиваются |
+| Быстрый | 1 500 | выключены |
+| Баланс | 10 000 | включены |
+| Глубокий | 50 000 | включены |
+| Весь пул | все, без выборки источников | включены |
+| Свой | 0–200 000; 0 — все | настраиваются |
+
+В обычных профилях каждая лента может дать до **10 000** уникальных кандидатов
+вместо прежних 1 200. **«Весь пул»** или значение **0** снимает и этот лимит,
+и ограничение числа проверок. Большие проходы занимают больше времени;
+параллелизм проверок остаётся ограниченным, остановка доступна в любой момент.
+В карточке охвата отдельно показываются собранный пул и прогресс проверки.
 
 В GUI скорость измеряется для 60 лучших, анонимность — для 150 лучших.
 Прочерк означает отсутствие успешного замера, а не нулевую скорость.
@@ -117,6 +124,12 @@ proxypulse.exe -db-only -top 20
 
 # Версия сборки
 proxypulse.exe -version
+
+# Массовый сбор и проверка всех списков, без ограничения на источник
+proxypulse.exe -source-cap 0 -limit 0 -workers 300 -out proxies.txt -json proxies.json
+
+# Проверить до 50 000 кандидатов, до 20 000 из каждого источника
+proxypulse.exe -source-cap 20000 -limit 50000 -out proxies.txt
 ```
 
 Ключевые флаги:
@@ -124,6 +137,7 @@ proxypulse.exe -version
 | Флаг | По умолчанию | Значение |
 |------|--------------|----------|
 | `-limit` | 0 (все) | сколько кандидатов проверять |
+| `-source-cap` | 10000 | кандидатов от одной ленты; 0 — вся лента |
 | `-workers` | 300 | одновременных проверок |
 | `-timeout` | 4s | таймаут на прокси |
 | `-top` | 10 | сколько строк показать |
@@ -161,7 +175,7 @@ proxypulse -db-only -best                      # перепроверить кэ
 | `roosterkid-https`, `roosterkid-socks5` | roosterkid/openproxylist |
 | `proxifly-http` | proxifly/free-proxy-list |
 | `proxyscrape-http`, `proxyscrape-socks5` | ProxyScrape API |
-| `geonode` | geonode.com API |
+| `geonode`, `geonode-2`…`geonode-5` | пять страниц geonode.com API |
 | `vakhov` | vakhov/fresh-proxy-list (JSON, per-protocol) |
 | `murong-http`, `murong-socks5` | MuRongPIG/Proxy-Master |
 | `hideipme-http`, `hideipme-socks5` | zloi-user/hideip.me (с гео) |
@@ -171,11 +185,27 @@ proxypulse -db-only -best                      # перепроверить кэ
 | `aliilapro` | ALIILAPRO/Proxy |
 | `anonwork-http` | anonym0uswork1221/free-proxies |
 | `prxchk-http`, `prxchk-socks5` | prxchk/proxy-list |
+| `iplocate-http`, `iplocate-https`, `iplocate-socks5` | iplocate/free-proxy-list |
+| `ercin-http`, `ercin-https`, `ercin-socks5` | ErcinDedeoglu/proxies |
+| `zaeem-http`, `zaeem-https`, `zaeem-socks5` | Zaeem20/FREE_PROXIES_LIST |
+| `mmpx-http`, `mmpx-https`, `mmpx-socks5` | mmpx12/proxy-list |
+| `jetkai-http`, `jetkai-https`, `jetkai-socks5` | jetkai/proxy-list, online-proxies |
+| `kang-http`, `kang-https`, `kang-socks5` | officialputuid/KangProxy |
+| `vpslab-http`, `vpslab-socks5` | VPSLabCloud/VPSLab-Free-Proxy-List |
+| `thordata-http`, `thordata-https`, `thordata-socks5` | Thordata/awesome-free-proxy-list |
+| `proxyscrape-mirror-http`, `proxyscrape-mirror-https`, `proxyscrape-mirror-socks5` | GitHub-зеркало ProxyScrape |
+| `r00tee-https`, `r00tee-socks5` | r00tee/Proxy-List |
+| `dpangestuw-http`, `dpangestuw-socks5` | dpangestuw/Free-Proxy |
 
-Всего **23 пула**, ~12 000 уникальных адресов после дедупликации. Кандидаты
-перемешиваются **round-robin** между пулами, а каждый пул отдаёт не больше
-`DefaultCapPerSource` (1200) записей, равномерно распределённых по списку, —
-поэтому гигантские зеркала (100k+ адресов) не вытесняют остальные пулы.
+Всего **57 лент**. Кандидаты перемешиваются **round-robin** между источниками,
+дубликаты удаляются при объединении, без промежуточного общего списка копий.
+При ограниченном сборе выборка равномерно распределяется по каждой ленте.
+Proxifly поддерживается с актуальным объектом геолокации и со старым строковым
+форматом; HTTP и SOCKS5 не теряются из-за изменения схемы.
+
+В контрольном запуске 15 октября 2026 года собрано **80 650 уникальных кандидатов**
+при `-source-cap 10000`; из первых 10 000 проверку прошли **234**. Это результат
+конкретного запуска, а не фиксированное число доступных или рабочих прокси.
 
 ## Как это устроено
 
@@ -188,8 +218,8 @@ internal/app           конвейер: fetch → validate → enrich → sort
 internal/store         JSON-кэш и экспорт
 ```
 
-Вес Windows x64 release-сборки: **GUI ≈ 10,28 МиБ**, **CLI ≈ 6,22 МиБ**,
-**ZIP с обоими приложениями ≈ 6,52 МиБ**. Размер может немного отличаться между
+Вес Windows x64 release-сборки: **GUI ≈ 10,29 МиБ**, **CLI ≈ 6,22 МиБ**,
+**ZIP с обоими приложениями ≈ 6,53 МиБ**. Размер может немного отличаться между
 версиями Go. Сборка с `-trimpath -s -w`, без CGO и внешних сред выполнения.
 Контрольные суммы — в `SHA256SUMS.txt` рядом с загрузками.
 
@@ -198,7 +228,7 @@ internal/store         JSON-кэш и экспорт
 прокси из рабочих записей кэша; отмена запроса сама по себе этого не делает.
 
 Проверка живого прокси — реальный `GET https://api.ipify.org/` через прокси:
-успех = ответ 200 и полученный адрес выхода. Анонимность определяется по
+успех = проверенный TLS-сертификат, ответ 200 и корректный IP выхода. Анонимность определяется по
 `httpbin.org/headers` (утечка реального IP = transparent).
 
 ## Ограничения
